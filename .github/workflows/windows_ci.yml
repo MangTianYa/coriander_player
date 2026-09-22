@@ -1,12 +1,26 @@
 name: CI
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布标签（留空则用 pubspec.yaml 的版本号，如 v1.6.4）'
+        required: false
+        default: ''
+      prerelease:
+        description: '是否标记为预发布'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Windows CI
+    name: Windows Build & Release
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -15,40 +29,84 @@ jobs:
       uses: subosito/flutter-action@v2
       with:
         flutter-version: '3.29.0'
-        
+
     - name: Get dependencies
       run: flutter pub get
 
-    - name: Build Windows
-      run: flutter build windows
+    - name: Build Windows (release)
+      run: flutter build windows --release
 
-    - name: Download dll
+    - name: Download BASS libraries
+      shell: pwsh
       run: |
-        mkdir -p build\tmp
-        mkdir -p build\windows\x64\runner\Release\BASS
-        
-        # download BASS add-ons from UN4SEEN
-        curl -o bass.zip https://www.un4seen.com/files/bass24.zip
-        curl -o bassape24.zip https://www.un4seen.com/files/bassape24.zip
-        curl -o bassdsd24.zip https://www.un4seen.com/files/bassdsd24.zip
-        curl -o bassflac24.zip https://www.un4seen.com/files/bassflac24.zip
-        curl -o bassmidi24.zip https://www.un4seen.com/files/bassmidi24.zip
-        curl -o bassopus24.zip https://www.un4seen.com/files/bassopus24.zip
-        curl -o basswv24.zip https://www.un4seen.com/files/basswv24.zip
-        
-        Expand-Archive -Path bass.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path bassape24.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path bassdsd24.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path bassflac24.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path bassmidi24.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path bassopus24.zip -DestinationPath build\tmp -Force
-        Expand-Archive -Path basswv24.zip -DestinationPath build\tmp -Force
-        
-        # mv build\tmp\x64\* build\windows\x64\runner\Release\
-        mv build\tmp\x64\* build\windows\x64\runner\Release\BASS\
+        New-Item -ItemType Directory -Force -Path build\tmp | Out-Null
+        $releaseBass = "build\windows\x64\runner\Release\BASS"
+        New-Item -ItemType Directory -Force -Path $releaseBass | Out-Null
 
-    - name: Upload artifacts
+        $urls = @(
+          "https://www.un4seen.com/files/bass24.zip",
+          "https://www.un4seen.com/files/bassape24.zip",
+          "https://www.un4seen.com/files/bassdsd24.zip",
+          "https://www.un4seen.com/files/bassflac24.zip",
+          "https://www.un4seen.com/files/bassmidi24.zip",
+          "https://www.un4seen.com/files/bassopus24.zip",
+          "https://www.un4seen.com/files/basswv24.zip",
+          "https://www.un4seen.com/files/basswasapi24.zip"
+        )
+        foreach ($u in $urls) {
+          $name = Split-Path $u -Leaf
+          curl.exe -L -o "build\tmp\$name" $u
+          Expand-Archive -Path "build\tmp\$name" -DestinationPath build\tmp -Force
+        }
+
+        # 取 x64 版本的 DLL 放入 Release\BASS
+        Move-Item -Path build\tmp\x64\* -Destination $releaseBass -Force
+
+    - name: Read version from pubspec
+      id: version
+      shell: pwsh
+      run: |
+        $line = Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$'
+        $ver = ($line.Matches.Groups[1].Value -split '\+')[0].Trim()
+        $inputTag = "${{ github.event.inputs.tag }}"
+        if ([string]::IsNullOrWhiteSpace($inputTag)) { $tag = "v$ver" } else { $tag = $inputTag }
+        "version=$ver"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "tag=$tag"          | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        Write-Host "version=$ver tag=$tag"
+
+    - name: Build installer (Inno Setup)
+      shell: pwsh
+      run: |
+        # windows-latest 已预装 Inno Setup 6
+        $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        if (-not (Test-Path $iscc)) {
+          choco install innosetup -y --no-progress
+        }
+        & $iscc "installer\coriander_player.iss"
+
+    - name: Package portable zip
+      shell: pwsh
+      run: |
+        $ver = "${{ steps.version.outputs.version }}"
+        Compress-Archive -Path build\windows\x64\runner\Release\* `
+          -DestinationPath "dist\coriander_player-$ver-portable.zip" -Force
+        Get-ChildItem dist
+
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: "Coriander Player Test Version"
-        path: build\windows\x64\runner\Release\*
+        name: "coriander_player-${{ steps.version.outputs.version }}"
+        path: dist\*
+
+    - name: Publish to GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: Coriander Player ${{ steps.version.outputs.tag }}
+        prerelease: ${{ github.event.inputs.prerelease }}
+        generate_release_notes: true
+        files: |
+          dist/coriander_player-${{ steps.version.outputs.version }}-setup.exe
+          dist/coriander_player-${{ steps.version.outputs.version }}-portable.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
