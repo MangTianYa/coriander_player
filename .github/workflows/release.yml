@@ -68,10 +68,11 @@ jobs:
             Write-Host "$path already exists, keep it."
           } else {
             # 空 token 桩：仅保证可编译。发布版「创建 issue」功能不可用，其它功能不受影响。
-            @'
-// ignore_for_file: constant_identifier_names
-const String CPFEEDBACK_KEY = "";
-'@ | Set-Content -Path $path -Encoding UTF8
+            $lines = @(
+              '// ignore_for_file: constant_identifier_names',
+              'const String CPFEEDBACK_KEY = "";'
+            )
+            Set-Content -Path $path -Value $lines -Encoding UTF8
             Write-Host "Created stub: $path"
           }
 
