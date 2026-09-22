@@ -19,7 +19,10 @@ permissions:
 jobs:
   build:
     name: Build & Release (Windows)
-    runs-on: windows-latest
+    # 固定到 windows-2022：windows-latest 现已指向 windows-2025，
+    # Flutter 3.27.4 在该镜像上探测不到 Visual Studio，会回退到
+    # "Visual Studio 16 2019" 生成器导致 CMake 报错找不到 VS。
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
@@ -38,6 +41,9 @@ jobs:
           flutter --version
           rustc --version
           cargo --version
+
+      - name: Flutter doctor (diagnose Visual Studio detection)
+        run: flutter doctor -v
 
       - name: Get dependencies
         run: flutter pub get
