@@ -44,8 +44,12 @@ class AudioTile extends StatelessWidget {
             audio.splitedArtists.length,
             (i) => MenuItemButton(
               onPressed: () {
-                final Artist artist = AudioLibrary
-                    .instance.artistCollection[audio.splitedArtists[i]]!;
+                final artist = AudioLibrary
+                    .instance.artistCollection[audio.splitedArtists[i]];
+                if (artist == null) {
+                  showTextOnSnackBar("本地音乐库中没有该艺术家");
+                  return;
+                }
                 context.push(
                   app_paths.ARTIST_DETAIL_PAGE,
                   extra: artist,
@@ -61,8 +65,11 @@ class AudioTile extends StatelessWidget {
         /// album
         MenuItemButton(
           onPressed: () {
-            final Album album =
-                AudioLibrary.instance.albumCollection[audio.album]!;
+            final album = AudioLibrary.instance.albumCollection[audio.album];
+            if (album == null) {
+              showTextOnSnackBar("本地音乐库中没有该专辑");
+              return;
+            }
             context.push(app_paths.ALBUM_DETAIL_PAGE, extra: album);
           },
           leadingIcon: const Icon(Symbols.album),

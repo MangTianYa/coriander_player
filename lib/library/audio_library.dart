@@ -6,6 +6,32 @@ import 'package:coriander_player/src/rust/api/tag_reader.dart';
 import 'package:coriander_player/utils.dart';
 import 'package:flutter/painting.dart';
 
+/// 音乐来源
+enum AudioSourceType {
+  /// 本地文件
+  local,
+
+  /// Jellyfin 媒体服务器
+  jellyfin;
+
+  static AudioSourceType fromName(String? name) {
+    for (var value in AudioSourceType.values) {
+      if (value.name == name) return value;
+    }
+    return AudioSourceType.local;
+  }
+}
+
+/// 由 Jellyfin 模块注册：根据 item id 实时生成带鉴权的流地址。
+///
+/// 采用「运行时解析」而非「存储完整 URL」，避免把 AccessToken（api_key）
+/// 随 [Audio.toMap] 写入 playlists.json 等文件（那会绕过 DPAPI 加密），
+/// 同时保证重新登录、token 轮换后地址依然有效。
+String? Function(String sourceId)? jellyfinStreamUrlResolver;
+
+/// 由 Jellyfin 模块注册：根据封面所在 item id 实时生成带鉴权的图片地址。
+String? Function(String coverItemId)? jellyfinCoverUrlResolver;
+
 /// from index.json
 class AudioLibrary {
   List<AudioFolder> folders;
@@ -180,7 +206,9 @@ class Audio {
 
   int? sampleRate;
 
-  /// absolute path
+  /// 本地文件：绝对路径；
+  /// 远程（Jellyfin）：形如 `jellyfin://{itemId}` 的合成唯一键。
+  /// 无论何种来源，[path] 都作为全局唯一标识（歌单、歌词来源、封面缓存的 key）。
   String path;
 
   /// secs since UNIX EPOCH
@@ -192,7 +220,29 @@ class Audio {
   /// 标签来源（Lofty、Windows、null）
   String? by;
 
+  /// 音乐来源：本地文件或 Jellyfin
+  AudioSourceType source;
+
+  /// 远程音源在服务器上的 id（如 Jellyfin item id）。本地音源为 null。
+  String? sourceId;
+
+  /// 远程音源封面所在的 item id（可能是曲目自身或所属专辑）。
+  /// 为 null 表示没有封面。不含 token，可安全落盘。
+  String? coverItemId;
+
   ImageProvider? _cover;
+
+  /// 是否为远程音源
+  bool get isRemote => source != AudioSourceType.local;
+
+  /// 交给播放器的地址：远程音源实时解析出带鉴权的流地址，本地音源为文件路径。
+  /// 未登录 / 无法解析时回退为 [path]（BASS 会报错并提示，属预期行为）。
+  String get playablePath {
+    if (isRemote && sourceId != null) {
+      return jellyfinStreamUrlResolver?.call(sourceId!) ?? path;
+    }
+    return path;
+  }
 
   /// 以“、”和“/”分割艺术家，会把名称中带有这些符号的艺术家分割。
   /// 暂时想不到别的方法。
@@ -207,8 +257,11 @@ class Audio {
     this.path,
     this.modified,
     this.created,
-    this.by,
-  ) : splitedArtists = artist.split(
+    this.by, {
+    this.source = AudioSourceType.local,
+    this.sourceId,
+    this.coverItemId,
+  }) : splitedArtists = artist.split(
           RegExp(AppSettings.instance.artistSplitPattern),
         );
 
@@ -224,6 +277,9 @@ class Audio {
         map["modified"],
         map["created"],
         map["by"],
+        source: AudioSourceType.fromName(map["source"]),
+        sourceId: map["source_id"],
+        coverItemId: map["cover_item_id"],
       );
 
   Map toMap() => {
@@ -237,19 +293,38 @@ class Audio {
         "path": path,
         "modified": modified,
         "created": created,
-        "by": by
+        "by": by,
+        "source": source.name,
+        "source_id": sourceId,
+        "cover_item_id": coverItemId,
       };
 
-  /// 读取音乐文件的图片，自动适应缩放
+  /// 读取音乐图片，自动适应缩放。
+  /// 本地音源从文件标签读取；远程音源从服务器图片地址加载。
   Future<ImageProvider?> _getResizedPic({
     required int width,
     required int height,
   }) async {
     final ratio = PlatformDispatcher.instance.views.first.devicePixelRatio;
+    final w = (width * ratio).round();
+    final h = (height * ratio).round();
+
+    if (isRemote) {
+      if (coverItemId == null) return null;
+
+      final base = jellyfinCoverUrlResolver?.call(coverItemId!);
+      if (base == null) return null;
+
+      /// 让服务器按需返回合适尺寸的图片，减少流量与内存
+      final sep = base.contains("?") ? "&" : "?";
+      final sizedUrl = "$base${sep}fillWidth=$w&fillHeight=$h";
+      return ResizeImage(NetworkImage(sizedUrl), width: w, height: h);
+    }
+
     return getPictureFromPath(
       path: path,
-      width: (width * ratio).round(),
-      height: (height * ratio).round(),
+      width: w,
+      height: h,
     ).then((pic) {
       if (pic == null) return null;
 

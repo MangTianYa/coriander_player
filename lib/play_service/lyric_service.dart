@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:coriander_player/app_settings.dart';
 import 'package:coriander_player/library/audio_library.dart';
+import 'package:coriander_player/library/jellyfin/jellyfin_source.dart';
 import 'package:coriander_player/lyric/lrc.dart';
 import 'package:coriander_player/lyric/lyric.dart';
 import 'package:coriander_player/lyric/lyric_source.dart';
@@ -72,6 +73,12 @@ class LyricService extends ChangeNotifier {
   Future<Lyric?> _getLyricDefault(bool localFirst) async {
     final nowPlaying = _getNowPlaying();
     if (nowPlaying == null) return Future.value(null);
+
+    // Jellyfin 音源：优先使用服务器自带歌词，取不到再回退在线匹配。
+    if (nowPlaying.source == AudioSourceType.jellyfin) {
+      return (await JellyfinSource.instance.getLyric(nowPlaying)) ??
+          (await getMostMatchedLyric(nowPlaying));
+    }
 
     if (localFirst) {
       return (await Lrc.fromAudioPath(nowPlaying)) ??

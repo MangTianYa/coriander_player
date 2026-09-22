@@ -4,6 +4,7 @@ import 'package:coriander_player/app_preference.dart';
 import 'package:coriander_player/app_settings.dart';
 import 'package:coriander_player/entry.dart';
 import 'package:coriander_player/hotkeys_helper.dart';
+import 'package:coriander_player/library/jellyfin/jellyfin_source.dart';
 import 'package:coriander_player/src/rust/api/logger.dart';
 import 'package:coriander_player/src/rust/frb_generated.dart';
 import 'package:coriander_player/theme_provider.dart';
@@ -70,6 +71,10 @@ Future<void> main() async {
   if (File("$supportPath\\app_preference.json").existsSync()) {
     await AppPreference.read();
   }
+
+  // 读取 Jellyfin 服务器配置（若已登录）
+  await JellyfinSource.instance.readConfig();
+
   final welcome = !File("$supportPath\\index.json").existsSync();
 
   await initWindow();

@@ -50,6 +50,16 @@ const int BASS_UNICODE = 2147483648;
 
 const int BASS_POS_BYTE = 0;
 
+/// 自动释放：流播放结束后自动释放（配合网络流的重连/结束）
+const int BASS_STREAM_AUTOFREE = 262144;
+
+/// 限制网络流下载速率为播放所需（false 表示尽快下载）
+const int BASS_CONFIG_NET_PLAYLIST = 21;
+const int BASS_CONFIG_NET_PREBUF = 15;
+const int BASS_CONFIG_NET_TIMEOUT = 11;
+const int BASS_CONFIG_NET_READTIMEOUT = 18;
+const int BASS_CONFIG_NET_AGENT = 16;
+
 const int BASS_ACTIVE_STOPPED = 0;
 
 const int BASS_ACTIVE_PLAYING = 1;
@@ -265,6 +275,50 @@ class Bass {
               DWORD)>>('BASS_StreamCreateFile');
   late final _BASS_StreamCreateFile = _BASS_StreamCreateFilePtr.asFunction<
       int Function(int, ffi.Pointer<ffi.Void>, int, int, int)>();
+
+  /// 从 URL 创建流（http/https/ftp）。
+  /// [proc] 传 nullptr、[user] 传 nullptr 即可实现简单的流播放。
+  int BASS_StreamCreateURL(
+    ffi.Pointer<ffi.Void> url,
+    int offset,
+    int flags,
+    ffi.Pointer<ffi.Void> proc,
+    ffi.Pointer<ffi.Void> user,
+  ) {
+    return _BASS_StreamCreateURL(
+      url,
+      offset,
+      flags,
+      proc,
+      user,
+    );
+  }
+
+  late final _BASS_StreamCreateURLPtr = _lookup<
+      ffi.NativeFunction<
+          HSTREAM Function(ffi.Pointer<ffi.Void>, DWORD, DWORD,
+              ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Void>)>>(
+      'BASS_StreamCreateURL');
+  late final _BASS_StreamCreateURL = _BASS_StreamCreateURLPtr.asFunction<
+      int Function(ffi.Pointer<ffi.Void>, int, int, ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Void>)>();
+
+  /// 设置全局配置项（如网络流超时、缓冲等）
+  int BASS_SetConfig(
+    int option,
+    int value,
+  ) {
+    return _BASS_SetConfig(
+      option,
+      value,
+    );
+  }
+
+  late final _BASS_SetConfigPtr =
+      _lookup<ffi.NativeFunction<BOOL Function(DWORD, DWORD)>>(
+          'BASS_SetConfig');
+  late final _BASS_SetConfig =
+      _BASS_SetConfigPtr.asFunction<int Function(int, int)>();
 
   int BASS_PluginLoad(
     ffi.Pointer<ffi.Char> file,

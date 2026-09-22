@@ -97,7 +97,19 @@ class PlaybackService extends ChangeNotifier {
   late final _shuffle = ValueNotifier(false);
   ValueNotifier<bool> get shuffle => _shuffle;
 
-  double get length => _player.length;
+  /// 音频总时长（秒）。
+  ///
+  /// 远程音源（Jellyfin）走 [BASS_StreamCreateURL]，BASS 的
+  /// [BASS_ChannelGetLength] 只能得到「已下载字节」对应的长度，
+  /// 无法反映歌曲真实时长（进度条会因此错乱、无法拖动）。
+  /// 这里改用 Jellyfin 元数据里的真实时长（[Audio.duration]）。
+  double get length {
+    final np = nowPlaying;
+    if (np != null && np.isRemote && np.duration > 0) {
+      return np.duration.toDouble();
+    }
+    return _player.length;
+  }
 
   double get position => _player.position;
 
@@ -125,23 +137,50 @@ class PlaybackService extends ChangeNotifier {
   void _loadAndPlay(int audioIndex, List<Audio> playlist) {
     try {
       _playlistIndex = audioIndex;
-      nowPlaying = playlist[audioIndex];
-      _player.setSource(nowPlaying!.path);
+      final audio = playlist[audioIndex];
+      nowPlaying = audio;
+
+      // 先更新 now playing 与歌词，UI 立即响应，不等待音源加载。
+      notifyListeners();
+      playService.lyricService.updateLyric();
+      ThemeProvider.instance.applyThemeFromAudio(audio);
+
+      if (audio.isRemote) {
+        // 网络流：在后台创建，避免阻塞 UI（切歌不卡顿）。
+        _player.setSourceAsync(audio.playablePath, isUrl: true).then((_) {
+          // 期间用户又切歌了，放弃本次播放。
+          if (nowPlaying != audio) return;
+          _afterSourceLoaded(audio);
+        }).catchError((err) {
+          LOGGER.e("[load and play async] $err");
+          showTextOnSnackBar(err.toString());
+        });
+      } else {
+        _player.setSource(audio.playablePath, isUrl: false);
+        _afterSourceLoaded(audio);
+      }
+    } catch (err) {
+      LOGGER.e("[load and play] $err");
+      showTextOnSnackBar(err.toString());
+    }
+  }
+
+  /// 音源加载完成后：设置音量、开始播放、更新 SMTC 显示。
+  void _afterSourceLoaded(Audio audio) {
+    try {
       setVolumeDsp(AppPreference.instance.playbackPref.volumeDsp);
 
-      playService.lyricService.updateLyric();
-
       _player.start();
-      notifyListeners();
-      ThemeProvider.instance.applyThemeFromAudio(nowPlaying!);
 
       _smtc.updateState(state: SMTCState.playing);
       _smtc.updateDisplay(
-        title: nowPlaying!.title,
-        artist: nowPlaying!.artist,
-        album: nowPlaying!.album,
+        title: audio.title,
+        artist: audio.artist,
+        album: audio.album,
         duration: (length * 1000).floor(),
-        path: nowPlaying!.path,
+        // 远程音源没有本地文件路径，SMTC 封面读取交给本地路径逻辑，
+        // 远程音源传空字符串（Rust 侧读取失败会优雅回退，不显示封面）。
+        path: audio.isRemote ? "" : audio.path,
       );
 
       playService.desktopLyricService.canSendMessage.then((canSend) {
@@ -149,10 +188,10 @@ class PlaybackService extends ChangeNotifier {
 
         playService.desktopLyricService
             .sendPlayerStateMessage(playerState == PlayerState.playing);
-        playService.desktopLyricService.sendNowPlayingMessage(nowPlaying!);
+        playService.desktopLyricService.sendNowPlayingMessage(audio);
       });
     } catch (err) {
-      LOGGER.e("[load and play] $err");
+      LOGGER.e("[after source loaded] $err");
       showTextOnSnackBar(err.toString());
     }
   }

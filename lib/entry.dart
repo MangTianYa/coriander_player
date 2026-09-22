@@ -8,6 +8,7 @@ import 'package:coriander_player/page/audio_detail_page.dart';
 import 'package:coriander_player/page/audios_page.dart';
 import 'package:coriander_player/page/folder_detail_page.dart';
 import 'package:coriander_player/page/folders_page.dart';
+import 'package:coriander_player/page/jellyfin_page.dart';
 import 'package:coriander_player/page/now_playing_page/page.dart';
 import 'package:coriander_player/page/playlist_detail_page.dart';
 import 'package:coriander_player/page/playlists_page.dart';
@@ -214,6 +215,14 @@ class Entry extends StatelessWidget {
                 },
               ),
             ],
+          ),
+
+          /// jellyfin page
+          GoRoute(
+            path: app_paths.JELLYFIN_PAGE,
+            pageBuilder: (context, state) => const SlideTransitionPage(
+              child: JellyfinPage(),
+            ),
           ),
 
           /// search page

@@ -18,6 +18,8 @@ const String PLAYLIST_DETAIL_PAGE = "/playlists/detail";
 const String SEARCH_PAGE = "/search";
 const String SEARCH_RESULT_PAGE = "/search/result";
 
+const String JELLYFIN_PAGE = "/jellyfin";
+
 const String NOW_PLAYING_PAGE = "/nowplaying";
 
 const String SETTINGS_PAGE = "/settings";

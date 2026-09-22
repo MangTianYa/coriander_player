@@ -655,6 +655,18 @@ class __NowPlayingInfoState extends State<_NowPlayingInfo> {
               maxLines: 1,
               style: TextStyle(color: scheme.onSecondaryContainer),
             ),
+            if (nowPlaying?.sampleRate != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                "采样率：${(nowPlaying!.sampleRate! / 1000).toStringAsFixed(1)} kHz"
+                "${nowPlaying.bitrate != null ? " · ${nowPlaying.bitrate} kbps" : ""}",
+                maxLines: 1,
+                style: TextStyle(
+                  color: scheme.onSecondaryContainer.withOpacity(0.75),
+                  fontSize: 13,
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             Expanded(
               child: Center(

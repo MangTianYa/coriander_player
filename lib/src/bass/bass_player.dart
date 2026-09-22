@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:coriander_player/app_preference.dart';
 import 'package:coriander_player/src/bass/bass_wasapi.dart' as BASS;
 import 'package:coriander_player/utils.dart';
@@ -51,6 +52,19 @@ class BassPlayer {
 
   String? _fPath;
   int? _fstream;
+
+  /// 当前音源是否为网络流（URL）
+  bool _fIsUrl = false;
+
+  /// 加载代次。每次调用 [setSource]/[setSourceAsync] 自增，
+  /// 用于识别异步创建网络流期间用户又切歌的情况（丢弃过期的流句柄）。
+  int _loadGeneration = 0;
+
+  /// 当前音源是否真正开始过播放。
+  /// 网络流刚创建时可能瞬时报告 stopped（尚未缓冲/播放），
+  /// 若此时误判为“播放完成”会触发自动切歌导致不停重播。
+  /// 只有真正播放过（观察到 playing）之后，stopped 才视为播放结束。
+  bool _hasStartedPlaying = false;
 
   /// 是否启用 wasapi 独占模式
   bool wasapiExclusive = false;
@@ -117,15 +131,34 @@ class BassPlayer {
       _playerStateStreamController.stream;
 
   Timer _getPositionUpdater() {
+    PlayerState? lastState;
     return Timer.periodic(
       const Duration(milliseconds: 33),
       (timer) {
         _positionStreamController.add(position);
 
-        /// check if the channel has completed
-        if (playerState == PlayerState.stopped) {
-          _playerStateStreamController.add(PlayerState.completed);
+        final state = playerState;
+
+        if (state == PlayerState.stopped) {
+          /// 只有真正播放过之后 stopped 才算播放完成，
+          /// 避免网络流刚创建时的瞬时 stopped 被误判为完成而不停重播。
+          if (_hasStartedPlaying) {
+            _playerStateStreamController.add(PlayerState.completed);
+          }
+        } else {
+          if (state == PlayerState.playing) {
+            _hasStartedPlaying = true;
+          }
+
+          /// 网络流（Jellyfin）从缓冲(stalled)转为实际播放(playing)时，
+          /// BASS 不会主动通知，播放/暂停按钮会一直停在“播放”图标。
+          /// 这里在轮询中监测状态变化并推送，保证控件与实际播放状态同步。
+          if (state != lastState) {
+            _playerStateStreamController.add(state);
+          }
         }
+
+        lastState = state;
       },
     );
   }
@@ -227,6 +260,18 @@ class BassPlayer {
     } catch (err) {
       LOGGER.e("[bass init] $err");
     }
+
+    /// 网络流相关配置（用于 Jellyfin 等远程音源）
+    try {
+      // 连接超时 15s
+      _bass.BASS_SetConfig(BASS.BASS_CONFIG_NET_TIMEOUT, 15000);
+      // 读取超时 15s
+      _bass.BASS_SetConfig(BASS.BASS_CONFIG_NET_READTIMEOUT, 15000);
+      // 预缓冲 25%，减少卡顿
+      _bass.BASS_SetConfig(BASS.BASS_CONFIG_NET_PREBUF, 25);
+    } catch (err) {
+      LOGGER.e("[bass net config] $err");
+    }
   }
 
   /// true: 操作成功；false: 操作失败
@@ -240,7 +285,7 @@ class BassPlayer {
       }
       wasapiExclusive = exclusive;
       if (_fstream != null && _fPath != null) {
-        setSource(_fPath!);
+        setSource(_fPath!, isUrl: _fIsUrl);
         setVolumeDsp(AppPreference.instance.playbackPref.volumeDsp);
         seek(lastPos);
         start();
@@ -256,7 +301,12 @@ class BassPlayer {
 
   /// if setSource has been called once,
   /// it will pause current channel and free current stream.
-  void setSource(String path) {
+  ///
+  /// [isUrl] 为 true 时，[path] 被当作网络流地址（http/https），
+  /// 使用 BASS_StreamCreateURL 创建流（用于 Jellyfin 等远程音源）。
+  void setSource(String path, {bool isUrl = false}) {
+    _loadGeneration++;
+    _hasStartedPlaying = false;
     if (_fstream != null) {
       _positionUpdater?.cancel();
       freeFStream();
@@ -267,24 +317,41 @@ class BassPlayer {
     const flags =
         BASS.BASS_UNICODE | BASS.BASS_SAMPLE_FLOAT | BASS.BASS_ASYNCFILE;
     const exclusiveFlags = flags | BASS.BASS_STREAM_DECODE;
-    final handle = _bass.BASS_StreamCreateFile(
-      BASS.FALSE,
-      pathPointer,
-      0,
-      0,
-      wasapiExclusive ? exclusiveFlags : flags,
-    );
+    final usedFlags = wasapiExclusive ? exclusiveFlags : flags;
+
+    final int handle;
+    if (isUrl) {
+      /// 网络流不使用 BASS_ASYNCFILE（那是本地文件异步读取标志）
+      const urlFlags = BASS.BASS_UNICODE | BASS.BASS_SAMPLE_FLOAT;
+      const urlExclusiveFlags = urlFlags | BASS.BASS_STREAM_DECODE;
+      handle = _bass.BASS_StreamCreateURL(
+        pathPointer,
+        0,
+        wasapiExclusive ? urlExclusiveFlags : urlFlags,
+        ffi.nullptr,
+        ffi.nullptr,
+      );
+    } else {
+      handle = _bass.BASS_StreamCreateFile(
+        BASS.FALSE,
+        pathPointer,
+        0,
+        0,
+        usedFlags,
+      );
+    }
 
     if (handle != 0) {
       _fstream = handle;
       _fPath = path;
+      _fIsUrl = isUrl;
     } else {
       _fstream = null;
       _fPath = null;
       switch (_bass.BASS_ErrorGetCode()) {
         case BASS.BASS_ERROR_INIT:
           _bassInit();
-          setSource(path);
+          setSource(path, isUrl: isUrl);
           break;
         case BASS.BASS_ERROR_NOTAVAIL:
           throw const FormatException(
@@ -317,6 +384,87 @@ class BassPlayer {
       }
     }
   }
+
+  /// 异步设置音源，避免网络流创建阻塞 UI 线程。
+  ///
+  /// 本地文件依旧走同步的 [setSource]（本地读取很快，且 [BASS_ASYNCFILE]
+  /// 已让实际解码异步进行）。网络流（[isUrl] 为 true）时，
+  /// [BASS_StreamCreateURL] 会阻塞到连接建立并完成预缓冲，
+  /// 放在后台 isolate 里执行，主线程（UI）保持流畅，切歌不再卡顿。
+  ///
+  /// 若在后台创建期间用户又切了歌（[_loadGeneration] 变化），
+  /// 则丢弃这次创建出来的过期流句柄。
+  Future<void> setSourceAsync(String path, {bool isUrl = false}) async {
+    if (!isUrl) {
+      setSource(path, isUrl: false);
+      return;
+    }
+
+    final generation = ++_loadGeneration;
+    _hasStartedPlaying = false;
+
+    if (_fstream != null) {
+      _positionUpdater?.cancel();
+      freeFStream();
+      _fstream = null;
+      _fPath = null;
+    }
+
+    const urlFlags = BASS.BASS_UNICODE | BASS.BASS_SAMPLE_FLOAT;
+    const urlExclusiveFlags = urlFlags | BASS.BASS_STREAM_DECODE;
+    final usedFlags = wasapiExclusive ? urlExclusiveFlags : urlFlags;
+
+    final bassLibPath = _resolveBassLibPath();
+    final url = path;
+
+    // 在后台 isolate 里执行阻塞的网络流创建。
+    // 返回 (handle, errorCode)。BASS 句柄是进程级全局的，可在主线程使用。
+    final (handle, errorCode) = await Isolate.run<(int, int)>(() {
+      final lib = ffi.DynamicLibrary.open(bassLibPath);
+      final bass = BASS.Bass(lib);
+      final urlPointer = url.toNativeUtf16();
+      final h = bass.BASS_StreamCreateURL(
+        urlPointer.cast<ffi.Void>(),
+        0,
+        usedFlags,
+        ffi.nullptr,
+        ffi.nullptr,
+      );
+      final e = h == 0 ? bass.BASS_ErrorGetCode() : 0;
+      ffi.malloc.free(urlPointer);
+      return (h, e);
+    });
+
+    // 期间用户又切歌了：丢弃这次创建的流。
+    if (generation != _loadGeneration) {
+      if (handle != 0) {
+        _bass.BASS_StreamFree(handle);
+      }
+      return;
+    }
+
+    if (handle != 0) {
+      _fstream = handle;
+      _fPath = path;
+      _fIsUrl = true;
+    } else {
+      _fstream = null;
+      _fPath = null;
+      if (errorCode == BASS.BASS_ERROR_INIT) {
+        _bassInit();
+        await setSourceAsync(path, isUrl: isUrl);
+        return;
+      }
+      LOGGER.e("[set source url] BASS_StreamCreateURL failed: $errorCode");
+      showTextOnSnackBar("网络音源加载失败（错误码 $errorCode）");
+    }
+  }
+
+  String _resolveBassLibPath() => path.join(
+        path.dirname(Platform.resolvedExecutable),
+        "BASS",
+        "bass.dll",
+      );
 
   /// [BASS_ATTRIB_VOLDSP] attribute does have direct effect on decoding/recording channels.
   void setVolumeDsp(double volume) {
