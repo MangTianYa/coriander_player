@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布标签（留空则用 pubspec.yaml 的版本号，如 v1.6.4）'
+        required: false
+        default: ''
+      prerelease:
+        description: '是否标记为预发布'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.4'
+          channel: 'stable'
+          cache: true
+
+      - name: Print versions
+        shell: pwsh
+        run: |
+          flutter --version
+          rustc --version
+          cargo --version
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Windows (release)
+        run: flutter build windows --release
+
+      - name: Download BASS libraries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = "build\bass_tmp"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $releaseBass = "build\windows\x64\runner\Release\BASS"
+          New-Item -ItemType Directory -Force -Path $releaseBass | Out-Null
+
+          $urls = @(
+            "https://www.un4seen.com/files/bass24.zip",
+            "https://www.un4seen.com/files/bassape24.zip",
+            "https://www.un4seen.com/files/bassdsd24.zip",
+            "https://www.un4seen.com/files/bassflac24.zip",
+            "https://www.un4seen.com/files/bassmidi24.zip",
+            "https://www.un4seen.com/files/bassopus24.zip",
+            "https://www.un4seen.com/files/basswv24.zip",
+            "https://www.un4seen.com/files/basswasapi24.zip"
+          )
+          foreach ($u in $urls) {
+            $name = Split-Path $u -Leaf
+            $dir = Join-Path $tmp ([System.IO.Path]::GetFileNameWithoutExtension($name))
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Write-Host "Downloading $u"
+            curl.exe -fL --retry 3 -o (Join-Path $tmp $name) $u
+            Expand-Archive -Path (Join-Path $tmp $name) -DestinationPath $dir -Force
+          }
+
+          # 每个压缩包的 x64 子目录里是 64 位 DLL，全部收集到 Release\BASS
+          Get-ChildItem -Path $tmp -Recurse -Directory -Filter "x64" | ForEach-Object {
+            Get-ChildItem -Path $_.FullName -Filter "*.dll" | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination $releaseBass -Force
+            }
+          }
+
+          Write-Host "BASS DLLs:"
+          Get-ChildItem $releaseBass | Select-Object Name
+
+      - name: Read version from pubspec
+        id: version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$'
+          $ver = ($line.Matches.Groups[1].Value -split '\+')[0].Trim()
+          $inputTag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($inputTag)) { $tag = "v$ver" } else { $tag = $inputTag }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "version=$ver tag=$tag"
+
+      - name: Ensure Inno Setup + Chinese language file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          # ChineseSimplified.isl 不在 Inno Setup 默认安装里，需单独放入 Languages 目录
+          $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
+          $zh = Join-Path $langDir "ChineseSimplified.isl"
+          if (-not (Test-Path $zh)) {
+            Write-Host "Downloading ChineseSimplified.isl"
+            curl.exe -fL --retry 3 -o $zh "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+          }
+          Get-ChildItem $langDir -Filter "Chinese*"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\coriander_player.iss"
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build\windows\x64\runner\Release\* `
+            -DestinationPath "dist\coriander_player-$ver-portable.zip" -Force
+          Get-ChildItem dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: "coriander_player-${{ steps.version.outputs.version }}"
+          path: dist\*
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Coriander Player ${{ steps.version.outputs.tag }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            dist/coriander_player-${{ steps.version.outputs.version }}-setup.exe
+            dist/coriander_player-${{ steps.version.outputs.version }}-portable.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
