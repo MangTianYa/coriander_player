@@ -1,5 +1,18 @@
 name: Release
 
+# 手动触发：构建 Windows Release 版，打包安装包与便携版，发布到 GitHub Releases。
+#
+# 本工作流固化了以下已知环境要点（改动前请确认仍成立）：
+#   - runs-on 用 windows-2022：windows-latest 已指向 windows-2025，
+#     Flutter 3.27.4 在该镜像上探测不到 Visual Studio，会回退到
+#     "Visual Studio 16 2019" 生成器导致 CMake 报错。
+#   - Flutter 固定 3.27.4 stable：本地实测该版本可完整编译（含 Rust/cargokit）。
+#   - lib/page/settings_page/cpfeedback_key.dart 被 .gitignore 排除，
+#     构建前需生成空 token 桩。
+#   - BASS 运行库需从 un4seen 下载，取各压缩包 x64 目录下的 DLL。
+#   - installer/coriander_player.iss 使用 ChineseSimplified.isl，
+#     该语言文件不在 Inno Setup 默认安装内，需单独下载。
+
 on:
   workflow_dispatch:
     inputs:
@@ -16,65 +29,77 @@ on:
 permissions:
   contents: write
 
+env:
+  FLUTTER_VERSION: '3.27.4'
+  RELEASE_DIR: build\windows\x64\runner\Release
+
 jobs:
   build:
     name: Build & Release (Windows)
-    # 固定到 windows-2022：windows-latest 现已指向 windows-2025，
-    # Flutter 3.27.4 在该镜像上探测不到 Visual Studio，会回退到
-    # "Visual Studio 16 2019" 生成器导致 CMake 报错找不到 VS。
     runs-on: windows-2022
 
     steps:
+      # ---------- 准备环境 ----------
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.27.4'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: 'stable'
           cache: true
 
-      - name: Print versions
+      - name: Diagnostics (versions + doctor)
         shell: pwsh
         run: |
           flutter --version
           rustc --version
           cargo --version
-
-      - name: Flutter doctor (diagnose Visual Studio detection)
-        run: flutter doctor -v
+          # -v 便于在 VS/工具链探测异常时定位问题
+          flutter doctor -v
 
       - name: Generate gitignored feedback key stub
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $path = "lib\page\settings_page\cpfeedback_key.dart"
-          if (-not (Test-Path $path)) {
-            # 该文件被 .gitignore 排除（原本存放自动提交 issue 的 GitHub token）。
-            # CI 用空 token 桩保证可编译；发布版的「创建 issue」功能将不可用。
+          if (Test-Path $path) {
+            Write-Host "$path already exists, keep it."
+          } else {
+            # 空 token 桩：仅保证可编译。发布版「创建 issue」功能不可用，其它功能不受影响。
             @'
 // ignore_for_file: constant_identifier_names
 const String CPFEEDBACK_KEY = "";
 '@ | Set-Content -Path $path -Encoding UTF8
-            Write-Host "Created stub $path"
-          } else {
-            Write-Host "$path already exists"
+            Write-Host "Created stub: $path"
           }
 
+      # ---------- 构建 ----------
       - name: Get dependencies
         run: flutter pub get
 
       - name: Build Windows (release)
         run: flutter build windows --release
 
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:RELEASE_DIR "coriander_player.exe"
+          if (-not (Test-Path $exe)) {
+            throw "构建产物缺失：$exe"
+          }
+          Write-Host "OK: $exe"
+
+      # ---------- 运行库 ----------
       - name: Download BASS libraries
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $tmp = "build\bass_tmp"
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-          $releaseBass = "build\windows\x64\runner\Release\BASS"
-          New-Item -ItemType Directory -Force -Path $releaseBass | Out-Null
+          $releaseBass = Join-Path $env:RELEASE_DIR "BASS"
+          New-Item -ItemType Directory -Force -Path $tmp, $releaseBass | Out-Null
 
           $urls = @(
             "https://www.un4seen.com/files/bass24.zip",
@@ -91,63 +116,88 @@ const String CPFEEDBACK_KEY = "";
             $dir = Join-Path $tmp ([System.IO.Path]::GetFileNameWithoutExtension($name))
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
             Write-Host "Downloading $u"
-            curl.exe -fL --retry 3 -o (Join-Path $tmp $name) $u
+            # -f：HTTP 错误即失败；--retry：网络抖动重试
+            curl.exe -fL --retry 3 --retry-delay 2 -o (Join-Path $tmp $name) $u
             Expand-Archive -Path (Join-Path $tmp $name) -DestinationPath $dir -Force
           }
 
-          # 每个压缩包的 x64 子目录里是 64 位 DLL，全部收集到 Release\BASS
+          # 收集各压缩包 x64 子目录下的 64 位 DLL
           Get-ChildItem -Path $tmp -Recurse -Directory -Filter "x64" | ForEach-Object {
             Get-ChildItem -Path $_.FullName -Filter "*.dll" | ForEach-Object {
               Copy-Item -Path $_.FullName -Destination $releaseBass -Force
             }
           }
 
-          Write-Host "BASS DLLs:"
-          Get-ChildItem $releaseBass | Select-Object Name
+          $dlls = Get-ChildItem $releaseBass -Filter "*.dll"
+          if ($dlls.Count -eq 0) { throw "未收集到任何 BASS DLL" }
+          Write-Host "BASS DLLs ($($dlls.Count)):"
+          $dlls | Select-Object Name | Format-Table -AutoSize
 
+      # ---------- 版本号 ----------
       - name: Read version from pubspec
         id: version
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $line = Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$'
+          if (-not $line) { throw "pubspec.yaml 未找到 version 字段" }
           $ver = ($line.Matches.Groups[1].Value -split '\+')[0].Trim()
           $inputTag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($inputTag)) { $tag = "v$ver" } else { $tag = $inputTag }
+          $tag = if ([string]::IsNullOrWhiteSpace($inputTag)) { "v$ver" } else { $inputTag }
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=$tag"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "version=$ver tag=$tag"
 
+      # ---------- 打包 ----------
       - name: Ensure Inno Setup + Chinese language file
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
+            Write-Host "Installing Inno Setup via choco"
             choco install innosetup -y --no-progress
           }
-          # ChineseSimplified.isl 不在 Inno Setup 默认安装里，需单独放入 Languages 目录
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 安装后仍找不到 ISCC.exe" }
+
+          # ChineseSimplified.isl 属非官方语言，需单独放入 Languages 目录
           $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
           $zh = Join-Path $langDir "ChineseSimplified.isl"
           if (-not (Test-Path $zh)) {
             Write-Host "Downloading ChineseSimplified.isl"
-            curl.exe -fL --retry 3 -o $zh "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+            curl.exe -fL --retry 3 --retry-delay 2 -o $zh `
+              "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
           }
-          Get-ChildItem $langDir -Filter "Chinese*"
+          if (-not (Test-Path $zh)) { throw "ChineseSimplified.isl 准备失败" }
 
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\coriander_player.iss"
 
       - name: Package portable zip
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $ver = "${{ steps.version.outputs.version }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path build\windows\x64\runner\Release\* `
+          Compress-Archive -Path "$env:RELEASE_DIR\*" `
             -DestinationPath "dist\coriander_player-$ver-portable.zip" -Force
-          Get-ChildItem dist
 
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = "${{ steps.version.outputs.version }}"
+          $setup = "dist\coriander_player-$ver-setup.exe"
+          $portable = "dist\coriander_player-$ver-portable.zip"
+          foreach ($f in @($setup, $portable)) {
+            if (-not (Test-Path $f)) { throw "产物缺失：$f" }
+          }
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
+
+      # ---------- 发布 ----------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
