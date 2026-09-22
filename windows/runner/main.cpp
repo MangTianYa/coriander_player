@@ -18,7 +18,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   flutter::DartProject project(L"data");
-  project.set_ui_thread_policy(flutter::UIThreadPolicy::RunOnSeparateThread);
+  // 注意：set_ui_thread_policy 不是官方 Flutter Windows embedder 的标准 API，
+  // 官方发行的 SDK（含 CI 用的 subosito/flutter-action）编译时会因找不到该方法而失败。
+  // 使用官方 SDK 构建时必须去掉此行；如需该 UI 线程策略优化需自建引擎。
+  // project.set_ui_thread_policy(flutter::UIThreadPolicy::RunOnSeparateThread);
 
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
