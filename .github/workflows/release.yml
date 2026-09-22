@@ -45,6 +45,22 @@ jobs:
       - name: Flutter doctor (diagnose Visual Studio detection)
         run: flutter doctor -v
 
+      - name: Generate gitignored feedback key stub
+        shell: pwsh
+        run: |
+          $path = "lib\page\settings_page\cpfeedback_key.dart"
+          if (-not (Test-Path $path)) {
+            # 该文件被 .gitignore 排除（原本存放自动提交 issue 的 GitHub token）。
+            # CI 用空 token 桩保证可编译；发布版的「创建 issue」功能将不可用。
+            @'
+// ignore_for_file: constant_identifier_names
+const String CPFEEDBACK_KEY = "";
+'@ | Set-Content -Path $path -Encoding UTF8
+            Write-Host "Created stub $path"
+          } else {
+            Write-Host "$path already exists"
+          }
+
       - name: Get dependencies
         run: flutter pub get
 
