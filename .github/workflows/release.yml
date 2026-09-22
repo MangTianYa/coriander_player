@@ -154,22 +154,22 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # 始终装最新版 Inno Setup，保证 ISCC 版本不低于下面中文语言文件所要求的版本
+          Write-Host "Installing/updating Inno Setup via choco"
+          choco install innosetup -y --no-progress
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            Write-Host "Installing Inno Setup via choco"
-            choco install innosetup -y --no-progress
-          }
           if (-not (Test-Path $iscc)) { throw "Inno Setup 安装后仍找不到 ISCC.exe" }
 
-          # ChineseSimplified.isl 属非官方语言，需单独放入 Languages 目录
+          # ChineseSimplified.isl 属非官方语言，官方安装包不含，需单独放入 Languages 目录。
+          # 使用社区维护、跟进最新 Inno Setup 版本的翻译（jrsoftware 仓库内已无此路径）。
           $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
           $zh = Join-Path $langDir "ChineseSimplified.isl"
-          if (-not (Test-Path $zh)) {
-            Write-Host "Downloading ChineseSimplified.isl"
-            curl.exe -fL --retry 3 --retry-delay 2 -o $zh `
-              "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
-          }
-          if (-not (Test-Path $zh)) { throw "ChineseSimplified.isl 准备失败" }
+          Write-Host "Downloading ChineseSimplified.isl"
+          curl.exe -fL --retry 3 --retry-delay 2 -o $zh `
+            "https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/main/ChineseSimplified.isl"
+          if (-not (Test-Path $zh)) { throw "ChineseSimplified.isl 下载失败" }
+          Write-Host "ISCC: $iscc"
+          Get-ChildItem $langDir -Filter 'Chinese*' | Select-Object Name
 
       - name: Build installer (Inno Setup)
         shell: pwsh
